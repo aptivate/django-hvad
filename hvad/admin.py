@@ -317,7 +317,7 @@ class TranslatableAdmin(ModelAdmin, TranslatableModelAdminMixin):
         # translation than expected. So we use the superclass' get_queryset
         # instead.
 
-        queryset = super(TranslatableAdmin, self).get_queryset(request)
+        queryset = super(TranslatableAdmin, self).queryset(request)
         model = self.model
         try:
             object_id = model._meta.pk.to_python(object_id)
