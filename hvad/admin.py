@@ -238,9 +238,7 @@ class TranslatableAdmin(ModelAdmin, TranslatableModelAdminMixin):
             (deleted_objects, perms_needed) = get_deleted_objects(
                 [obj], translations_model._meta, request.user, self.admin_site)
         
-        
         lang = get_language_name(language_code) 
-            
 
         if request.POST: # The user has already confirmed the deletion.
             if perms_needed:
@@ -305,6 +303,22 @@ class TranslatableAdmin(ModelAdmin, TranslatableModelAdminMixin):
     def delete_model_translation(self, request, obj):
         obj.delete()
     
+    def get_changelist(self, request, **kwargs):
+        """
+        We should use a queryset with fallbacks for our changelist, to allow
+        admins to edit objects that aren't translated into their own language.
+        But get_object() shouldn't use fallbacks, so we leave the queryset()
+        method untouched.
+        """
+
+        old_queryset_method = self.get_query_set
+        qs = self.get_fallback_queryset(request)
+        try:
+            self.get_query_set = lambda request: qs
+            return super(TranslatableAdmin, self).get_changelist(request)
+        finally:
+            self.get_query_set = old_queryset_method
+
     def get_object(self, request, object_id):
         """
         Returns an instance matching the primary key provided. ``None``  is
@@ -317,28 +331,38 @@ class TranslatableAdmin(ModelAdmin, TranslatableModelAdminMixin):
         # translation than expected. So we use the superclass' get_queryset
         # instead.
 
-        queryset = super(TranslatableAdmin, self).queryset(request)
+        lang_code = self._language(request)
+        queryset = self.queryset(request)
         model = self.model
-        try:
-            object_id = model._meta.pk.to_python(object_id)
-            return queryset.get(pk=object_id)
-        except (model.DoesNotExist, ValidationError, ValueError):
-            pass
+        object_id = model._meta.pk.to_python(object_id)
 
-        queryset = self.model.objects.untranslated()
         try:
-            object_id = model._meta.pk.to_python(object_id)
-            obj = queryset.get(pk=object_id)
-        except (model.DoesNotExist, ValidationError):
+            shared_obj = queryset.get(pk=object_id)
+        except (model.DoesNotExist, ValidationError, ValueError):
             return None
 
-        new_translation = model._meta.translations_model()
-        new_translation.language_code = self._language(request)
-        new_translation.master = obj
-        setattr(obj, model._meta.translations_cache, new_translation)
-        return obj
+        # There isn't one in lang_code already, so find any existing one
+        # (any will do, they all have the same shared field values) and
+        # translate it into lang_code ourselves.
 
-    def queryset(self, request):
+        try:
+            translations = model._meta.translations_model.objects
+            translation = translations.get(master=shared_obj,
+                language_code=lang_code)
+        except (model.DoesNotExist, ValidationError):
+            translation = model._meta.translations_model(master=shared_obj,
+                language_code=lang_code)
+
+        setattr(shared_obj, model._meta.translations_cache, translation)
+        return shared_obj
+
+    def get_fallback_queryset(self, request):
+        """
+        We should use a queryset with fallbacks for our changelist, to allow
+        admins to edit objects that aren't translated into their own language.
+        But get_object() shouldn't use fallbacks, so we leave the queryset()
+        method untouched.
+        """
         language = self._language(request)
         languages = [language,]
         for lang in FALLBACK_LANGUAGES:

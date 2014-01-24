@@ -4,7 +4,7 @@ from django.contrib import admin
 from django.contrib.auth.models import User
 from django.core.urlresolvers import reverse
 from django.http import HttpResponseForbidden, HttpResponseRedirect
-from hvad.admin import InlineModelForm
+from hvad.admin import InlineModelForm, TranslatableAdmin
 from hvad.admin import translatable_modelform_factory
 from hvad.forms import TranslatableModelForm
 from hvad.test_utils.context_managers import LanguageOverride
@@ -329,8 +329,36 @@ class NormalAdminTests(NaniTestCase, BaseAdminTests, SuperuserMixin):
             ja = Normal.objects.using_translations().get(language_code='ja')
             self.assertEqual(ja.shared_field, SHARED)
             self.assertEqual(ja.translated_field, TRANS_JA)
+
+    def test_admin_get_with_language_param(self):
+        SHARED = 'shared'
+        TRANS_EN = 'English'
+        TRANS_JA = u'日本語'
+
+        obj = Normal.objects.language('en').create(
+            shared_field=SHARED,
+            translated_field=TRANS_EN,
+        )
+
+        obj.translate('ja')
+        obj.translated_field = TRANS_JA
+        obj.save()
+        
+        with LanguageOverride('ja'):
+            with self.login_user_context(username='admin', password='admin'):
+                url = reverse('admin:app_normal_change', args=(obj.pk,))
+
+                response = self.client.get("%s?language=en" % url)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(TRANS_EN,
+                    response.context['original'].translated_field)
+
+                response = self.client.get("%s?language=ja" % url)
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(TRANS_JA,
+                    response.context['original'].translated_field)
     
-    def test_admin_with_param(self):
+    def test_admin_post_with_language_param(self):
         with LanguageOverride('ja'):
             with self.login_user_context(username='admin', password='admin'):
                 SHARED = 'shared'
@@ -349,7 +377,38 @@ class NormalAdminTests(NaniTestCase, BaseAdminTests, SuperuserMixin):
                 obj = Normal.objects.language('en')[0]
                 self.assertEqual(obj.shared_field, SHARED)
                 self.assertEqual(obj.translated_field, TRANS)
-    
+
+    def test_admin_get_object_not_translated_honours_custom_queryset(self):
+        """
+        We can't go just inventing our own querysets in
+        TranslatableAdmin.get_object(); we have to use the one supplied by the
+        queryset attribute, to avoid bypassing restrictions imposed by the
+        developer on which objects can be retrieved.
+        """
+
+        TRANS_JA = u'日本語'
+
+        public_one = Normal.objects.language('ja').create(
+            shared_field='public',
+            translated_field="public %s" % TRANS_JA,
+        )
+        private_one = Normal.objects.language('ja').create(
+            shared_field='private',
+            translated_field="private %s" % TRANS_JA,
+        )
+
+        rf = RequestFactory()
+        get_request = rf.get('/admin/app/normal/')
+
+        class CustomAdmin(TranslatableAdmin):
+            def queryset(self, request):
+                return super(CustomAdmin, self).queryset(request).filter(shared_field='public')
+        custom_admin = CustomAdmin(Normal, admin.site._registry)
+
+        with LanguageOverride('ja'):
+            self.assertEqual(public_one, custom_admin.get_object(get_request, public_one.id))
+            self.assertIsNone(custom_admin.get_object(get_request, private_one.id))
+
 
 class AdminEditTests(NaniTestCase, BaseAdminTests, TwoTranslatedNormalMixin,
                      SuperuserMixin):
