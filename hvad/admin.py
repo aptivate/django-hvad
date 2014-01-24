@@ -22,7 +22,7 @@ from hvad.compat.urls import urlencode
 from hvad.forms import TranslatableModelForm, translatable_inlineformset_factory, translatable_modelform_factory
 import django
 from hvad.utils import get_cached_translation, get_translation
-from hvad.manager import FALLBACK_LANGUAGES
+from hvad.manager import FALLBACK_LANGUAGES, FallbackQueryset
 
 
 NEW_GET_DELETE_OBJECTS = LooseVersion(django.get_version()) >= LooseVersion('1.3')
@@ -311,13 +311,20 @@ class TranslatableAdmin(ModelAdmin, TranslatableModelAdminMixin):
         method untouched.
         """
 
-        old_queryset_method = self.get_query_set
         qs = self.get_fallback_queryset(request)
-        try:
-            self.get_query_set = lambda request: qs
-            return super(TranslatableAdmin, self).get_changelist(request)
-        finally:
-            self.get_query_set = old_queryset_method
+        model_admin = self
+
+        OriginalChangelist = super(TranslatableAdmin,
+            self).get_changelist(request, **kwargs)
+        class ChangelistWrapper(OriginalChangelist):
+            def __init__(self, *args, **kwargs):
+                old_queryset_method = model_admin.queryset
+                try:
+                    model_admin.queryset = lambda request: qs
+                    super(ChangelistWrapper, self).__init__(*args, **kwargs)
+                finally:
+                    model_admin.queryset = old_queryset_method
+        return ChangelistWrapper
 
     def get_object(self, request, object_id):
         """
@@ -368,7 +375,10 @@ class TranslatableAdmin(ModelAdmin, TranslatableModelAdminMixin):
         for lang in FALLBACK_LANGUAGES:
             if not lang in languages:
                 languages.append(lang)
-        qs = self.model._default_manager.untranslated().use_fallbacks(*languages)
+
+        qs = FallbackQueryset(model=self.model, query=self.queryset(request).query)
+        qs = qs.use_fallbacks(*languages)
+
         # TODO: this should be handled by some parameter to the ChangeList.
         ordering = getattr(self, 'ordering', None) or () # otherwise we might try to *None, which is bad ;)
         if ordering:

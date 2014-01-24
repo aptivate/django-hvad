@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 from django.conf import settings
 from django.contrib import admin
+from django.contrib.admin.views.main import ChangeList
 from django.contrib.auth.models import User
 from django.core.urlresolvers import reverse
 from django.http import HttpResponseForbidden, HttpResponseRedirect
@@ -378,6 +379,19 @@ class NormalAdminTests(NaniTestCase, BaseAdminTests, SuperuserMixin):
                 self.assertEqual(obj.shared_field, SHARED)
                 self.assertEqual(obj.translated_field, TRANS)
 
+    changelist_holder = []
+
+    class FakeChangelist(ChangeList):
+        def __init__(self, *args, **kwargs):
+            changelist_holder.append(self)
+            super(FakeChangelist, self).__init__(*args, **kwargs)
+    
+    class CustomAdmin(TranslatableAdmin):
+        def queryset(self, request):
+            return super(CustomAdmin, self).queryset(request).filter(shared_field='public')
+        def get_changelist(self, request, **kwargs):
+            return FakeChangelist
+
     def test_admin_get_object_not_translated_honours_custom_queryset(self):
         """
         We can't go just inventing our own querysets in
@@ -403,11 +417,55 @@ class NormalAdminTests(NaniTestCase, BaseAdminTests, SuperuserMixin):
         class CustomAdmin(TranslatableAdmin):
             def queryset(self, request):
                 return super(CustomAdmin, self).queryset(request).filter(shared_field='public')
-        custom_admin = CustomAdmin(Normal, admin.site._registry)
+        custom_admin = CustomAdmin(Normal, admin.site)
 
         with LanguageOverride('ja'):
             self.assertEqual(public_one, custom_admin.get_object(get_request, public_one.id))
             self.assertIsNone(custom_admin.get_object(get_request, private_one.id))
+
+        self.assertSequenceEqual([public_one],
+            list(custom_admin.queryset(get_request)))
+
+    def test_admin_changelist_honours_custom_queryset(self):
+        changelist_holder = []
+
+        class CustomAdmin(TranslatableAdmin):
+            def queryset(self, request):
+                return super(CustomAdmin, self).queryset(request).filter(shared_field='public')
+
+            def get_changelist(self, request, **kwargs):
+                OriginalChangelist = super(CustomAdmin,
+                    self).get_changelist(request, **kwargs)
+
+                class FakeChangelist(OriginalChangelist):
+                    def __init__(self, *args, **kwargs):
+                        changelist_holder.append(self)
+                        super(FakeChangelist, self).__init__(*args, **kwargs)
+
+                return FakeChangelist
+        custom_admin = CustomAdmin(Normal, admin.site)
+
+        public_one = Normal.objects.language('ja').create(
+            shared_field='public',
+        )
+        private_one = Normal.objects.language('ja').create(
+            shared_field='private',
+        )
+
+        rf = RequestFactory()
+        get_request = rf.get('/admin/app/normal/')
+        get_request.user = User.objects.get(username='admin')
+
+        response = custom_admin.changelist_view(get_request)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(1, len(changelist_holder), changelist_holder)
+        changelist = changelist_holder[0]
+        self.assertSequenceEqual([public_one], list(changelist.get_query_set()))
+        
+        admin_public_one = changelist.root_query_set.get()
+        self.assertEqual('ja', admin_public_one.language_code)
+        self.assertSequenceEqual(['ja'],
+            admin_public_one.get_available_languages())
 
 
 class AdminEditTests(NaniTestCase, BaseAdminTests, TwoTranslatedNormalMixin,
